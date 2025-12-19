@@ -23,9 +23,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # =========================================================
 # HEADER
 # =========================================================
-h1, h2 = st.columns([1, 5])
+h1, h2 = st.columns([3, 7])
 with h1:
-    st.image("assets/banner.webp", width=220)
+    st.image("assets/banner.webp", width=350)
 with h2:
     st.markdown("""
     <h1 style="font-size:36px; margin-bottom:4px;">🧠 Multimodal AI Content Detection</h1>
