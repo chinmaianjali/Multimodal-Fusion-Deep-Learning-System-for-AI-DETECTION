@@ -23,7 +23,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # =========================================================
 # HEADER
 # =========================================================
-h1, h2 = st.columns([2, 6])
+h1, h2 = st.columns([2, 4])
 with h1:
     st.image("assets/banner.webp", width=350)
 with h2:
