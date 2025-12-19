@@ -59,31 +59,38 @@ def load_image_model():
 # ===============================
 # LOAD AUDIO MODEL
 # ===============================
+
+
 class AudioCNN(nn.Module):
-    def __init__(self, num_classes=2):
+  def __init__(self):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(1, 16, 3, padding=1),
             nn.BatchNorm2d(16),
             nn.ReLU(),
+            nn.Dropout(0.3),
             nn.MaxPool2d(2),
 
             nn.Conv2d(16, 32, 3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.MaxPool2d(2)
+            nn.Dropout(0.3),
+            nn.MaxPool2d(2),
+
+            nn.AdaptiveAvgPool2d((1, 1))
         )
         self.fc = nn.Sequential(
-            nn.Linear(32, 64),
+            nn.Linear(32, 16),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(64, num_classes)
+            nn.Dropout(0.4),
+            nn.Linear(16, 2)
         )
 
-    def forward(self, x):
+  def forward(self, x):
         x = self.conv(x)
-        x = x.mean(dim=[2, 3])
+        x = x.view(x.size(0), -1)
         return self.fc(x)
+
 
 @st.cache_resource
 def load_audio_model():
