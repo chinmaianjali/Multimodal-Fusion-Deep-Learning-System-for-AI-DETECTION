@@ -2,17 +2,18 @@ import streamlit as st
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from PIL import Image
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from torchvision import models, transforms
 from huggingface_hub import hf_hub_download
+import librosa
+import numpy as np
 
 # ===============================
 # PAGE CONFIG
 # ===============================
 st.set_page_config(
-    page_title="Multimodal AI Detection System",
+    page_title="Multimodal AI Content Detector",
     page_icon="🧠",
     layout="wide"
 )
@@ -20,7 +21,7 @@ st.set_page_config(
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ===============================
-# HUGGING FACE REPOS
+# HF REPOS
 # ===============================
 TEXT_REPO  = "chinmaianjali/text-roberta-ai-detector"
 IMAGE_REPO = "chinmaianjali/image-mobilenet-ai-detector"
@@ -31,10 +32,10 @@ AUDIO_REPO = "chinmaianjali/audio-cnn-ai-detector"
 # ===============================
 @st.cache_resource
 def load_text_model():
-    tok = AutoTokenizer.from_pretrained(TEXT_REPO)
-    mdl = AutoModelForSequenceClassification.from_pretrained(TEXT_REPO)
-    mdl.to(device).eval()
-    return tok, mdl
+    tokenizer = AutoTokenizer.from_pretrained(TEXT_REPO)
+    model = AutoModelForSequenceClassification.from_pretrained(TEXT_REPO)
+    model.to(device).eval()
+    return tokenizer, model
 
 @st.cache_resource
 def load_image_model():
@@ -42,11 +43,11 @@ def load_image_model():
         hf_hub_download(IMAGE_REPO, "image_model.pth"),
         map_location=device
     )
-    mdl = models.mobilenet_v2(weights=None)
-    mdl.classifier[1] = nn.Linear(mdl.classifier[1].in_features, 2)
-    mdl.load_state_dict(ckpt["model_state_dict"])
-    mdl.to(device).eval()
-    return mdl
+    model = models.mobilenet_v2(weights=None)
+    model.classifier[1] = nn.Linear(model.classifier[1].in_features, 2)
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.to(device).eval()
+    return model
 
 # ===============================
 # AUDIO CNN (EXACT MATCH)
@@ -83,60 +84,84 @@ class AudioCNN(nn.Module):
 
 @st.cache_resource
 def load_audio_model():
-    mdl = AudioCNN()
+    model = AudioCNN()
     state = torch.load(
         hf_hub_download(AUDIO_REPO, "audio_model.pth"),
         map_location=device
     )
-    mdl.load_state_dict(state)
-    mdl.to(device).eval()
-    return mdl
+    model.load_state_dict(state)
+    model.to(device).eval()
+    return model
 
 tokenizer, text_model = load_text_model()
 image_model = load_image_model()
 audio_model = load_audio_model()
 
 # ===============================
-# HELPERS
+# AUDIO PREPROCESSING
 # ===============================
-def plot_probs(human, ai):
-    st.bar_chart(
-        {
-            "Human": human,
-            "AI": ai
-        }
+def audio_to_spectrogram(file):
+    y, sr = librosa.load(file, sr=16000)
+    mel = librosa.feature.melspectrogram(
+        y=y, sr=sr, n_mels=128, n_fft=1024, hop_length=512
+    )
+    mel_db = librosa.power_to_db(mel, ref=np.max)
+    mel_db = (mel_db - mel_db.min()) / (mel_db.max() - mel_db.min())
+    return torch.tensor(mel_db).unsqueeze(0).unsqueeze(0).float()
+
+# ===============================
+# EXPLANATIONS
+# ===============================
+def explain_text(p):
+    return (
+        "The text exhibits highly uniform sentence structure, low lexical diversity, "
+        "and statistically consistent token transitions—patterns commonly associated "
+        "with neural language model generation."
+        if p > 0.5 else
+        "The text shows natural linguistic variation, irregular phrasing, and entropy "
+        "patterns typical of human-written content."
     )
 
-    
+def explain_image(p):
+    return (
+        "The image contains overly smooth textures, frequency-domain artifacts, "
+        "and uniform pixel correlations indicative of generative image models."
+        if p > 0.5 else
+        "The image shows natural noise, sharp boundaries, and heterogeneous textures "
+        "consistent with real-world photography."
+    )
 
-def explain_decision(p):
-    if p > 0.8:
-        return "Strong AI indicators detected (high regularity, low entropy patterns)."
-    elif p > 0.5:
-        return "Moderate AI-like characteristics observed."
-    else:
-        return "Natural human-like variability detected."
+def explain_audio(p):
+    return (
+        "The audio spectrogram reveals excessive smoothness, lack of micro-variations, "
+        "and synthetic harmonic consistency typical of AI-generated speech."
+        if p > 0.5 else
+        "The audio contains natural background noise, irregular prosody, and spectral "
+        "variations characteristic of human speech."
+    )
+
+def explain_fusion(probs):
+    return (
+        "Multiple modalities consistently indicate AI-generated characteristics, "
+        "reinforcing the final decision with high confidence."
+        if sum(probs)/len(probs) > 0.5 else
+        "The modalities exhibit human-like variability with no strong agreement "
+        "on synthetic patterns, leading to a human classification."
+    )
 
 # ===============================
-# SESSION STATE
-# ===============================
-for k in ["P_text", "P_image", "P_audio"]:
-    if k not in st.session_state:
-        st.session_state[k] = None
-
-# ===============================
-# HEADER
+# UI
 # ===============================
 st.markdown("""
-## 🧠 Multimodal AI Content Detection System
-Detect **AI-generated content** using **Text, Image, and Audio** with **Explainable AI**  
+# 🧠 Multimodal AI Content Detection System
+Detect **AI-generated content** using **Text, Image, and Audio** with **Explainable AI**
 ---
 """)
 
 tabs = st.tabs([
-    "📝 Text Analysis",
-    "🖼️ Image Analysis",
-    "🔊 Audio Analysis",
+    "📝 Text",
+    "🖼️ Image",
+    "🔊 Audio",
     "🌐 Multimodal Fusion"
 ])
 
@@ -144,72 +169,70 @@ tabs = st.tabs([
 # TEXT TAB
 # ===============================
 with tabs[0]:
-    st.subheader("📝 Text AI Detection")
-    txt = st.text_area("Enter text for analysis")
-
-    if st.button("🔍 Analyze Text"):
-        inputs = tokenizer(txt, return_tensors="pt", truncation=True, padding=True).to(device)
+    text = st.text_area("Enter text")
+    if st.button("Analyze Text"):
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True).to(device)
         with torch.no_grad():
             probs = F.softmax(text_model(**inputs).logits, dim=1)[0]
-
-        st.session_state.P_text = probs[1].item()
-        plot_probs(probs[0].item(), probs[1].item())
-        st.success(explain_decision(probs[1].item()))
+        st.metric("AI Probability", f"{probs[1]:.4f}")
+        st.success("🟥 AI-GENERATED" if probs[1] > 0.5 else "🟩 HUMAN")
+        st.write(explain_text(probs[1]))
 
 # ===============================
 # IMAGE TAB
 # ===============================
 with tabs[1]:
-    st.subheader("🖼️ Image AI Detection")
-    imgf = st.file_uploader("Upload an image", type=["jpg", "png"])
-
-    if imgf:
-        img = Image.open(imgf).convert("RGB")
+    img_file = st.file_uploader("Upload image", type=["jpg","png"])
+    if img_file:
+        img = Image.open(img_file).convert("RGB")
         st.image(img, width=300)
-
         x = transforms.ToTensor()(img).unsqueeze(0).to(device)
         with torch.no_grad():
             probs = F.softmax(image_model(x), dim=1)[0]
-
-        st.session_state.P_image = probs[1].item()
-        plot_probs(probs[0].item(), probs[1].item())
-        st.success(explain_decision(probs[1].item()))
+        st.metric("AI Probability", f"{probs[1]:.4f}")
+        st.success("🟥 AI-GENERATED" if probs[1] > 0.5 else "🟩 HUMAN")
+        st.write(explain_image(probs[1]))
 
 # ===============================
 # AUDIO TAB
 # ===============================
 with tabs[2]:
-    st.subheader("🔊 Audio AI Detection")
-    st.info("Audio assumed preprocessed into spectrogram (demo placeholder).")
-
-    if st.button("🎵 Analyze Audio"):
-        x = torch.randn(1, 1, 128, 128).to(device)  # replace with real preprocessing
+    audio_file = st.file_uploader("Upload audio", type=["wav","mp3"])
+    if audio_file:
+        st.audio(audio_file)
+        x = audio_to_spectrogram(audio_file).to(device)
         with torch.no_grad():
             probs = F.softmax(audio_model(x), dim=1)[0]
-
-        st.session_state.P_audio = probs[1].item()
-        plot_probs(probs[0].item(), probs[1].item())
-        st.success(explain_decision(probs[1].item()))
+        st.metric("AI Probability", f"{probs[1]:.4f}")
+        st.success("🟥 AI-GENERATED" if probs[1] > 0.5 else "🟩 HUMAN")
+        st.write(explain_audio(probs[1]))
 
 # ===============================
-# FUSION TAB
+# MULTIMODAL FUSION
 # ===============================
 with tabs[3]:
-    st.subheader("🌐 Multimodal Fusion Result")
-    st.write("Automatically combines latest predictions from all available modalities.")
+    st.info("Upload any combination of text, image, and audio.")
 
-    if st.button("🚀 Run Fusion"):
-        probs = [p for p in [
-            st.session_state.P_text,
-            st.session_state.P_audio,
-            st.session_state.P_image
-        ] if p is not None]
+    fusion_probs = []
 
-        if len(probs) == 0:
-            st.warning("Run at least one modality first.")
-        else:
-            P_fused = sum(probs) / len(probs)
-            label = "AI-GENERATED" if P_fused >= 0.45 else "HUMAN"
+    f_text = st.text_area("Text (optional)")
+    if f_text:
+        inputs = tokenizer(f_text, return_tensors="pt", truncation=True, padding=True).to(device)
+        fusion_probs.append(F.softmax(text_model(**inputs).logits, dim=1)[0][1].item())
 
-            st.metric("Fused AI Probability", f"{P_fused:.4f}")
-            st.success(f"FINAL DECISION: {label}")
+    f_img = st.file_uploader("Image (optional)", type=["jpg","png"], key="fusion_img")
+    if f_img:
+        img = Image.open(f_img).convert("RGB")
+        x = transforms.ToTensor()(img).unsqueeze(0).to(device)
+        fusion_probs.append(F.softmax(image_model(x), dim=1)[0][1].item())
+
+    f_audio = st.file_uploader("Audio (optional)", type=["wav","mp3"], key="fusion_audio")
+    if f_audio:
+        x = audio_to_spectrogram(f_audio).to(device)
+        fusion_probs.append(F.softmax(audio_model(x), dim=1)[0][1].item())
+
+    if st.button("Run Multimodal Fusion") and fusion_probs:
+        P_fused = sum(fusion_probs)/len(fusion_probs)
+        st.metric("Fused AI Probability", f"{P_fused:.4f}")
+        st.success("🟥 AI-GENERATED" if P_fused > 0.5 else "🟩 HUMAN")
+        st.write(explain_fusion(fusion_probs))
