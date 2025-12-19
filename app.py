@@ -23,7 +23,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # =========================================================
 # HEADER
 # =========================================================
-h1, h2 = st.columns([3, 7])
+h1, h2 = st.columns([2, 6])
 with h1:
     st.image("assets/banner.webp", width=350)
 with h2:
@@ -223,8 +223,8 @@ with tabs[2]:
     with c2:
         st.markdown("<h2 style='font-size:26px;'>🔊 Audio Analysis</h2>", unsafe_allow_html=True)
         a = st.file_uploader("📤 Upload audio", type=["wav","mp3"])
-        r = st.audio_input("🎙️ Record audio")
-        src = a if a else r
+        
+        src = a 
         if src:
             p = F.softmax(audio_model(audio_to_spec(src).to(device)), dim=1)[0]
             bar_probs(p[0].item(), p[1].item())
