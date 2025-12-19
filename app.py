@@ -2,7 +2,7 @@ import streamlit as st
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import matplotlib.pyplot as plt
+
 from PIL import Image
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from torchvision import models, transforms
@@ -100,11 +100,14 @@ audio_model = load_audio_model()
 # HELPERS
 # ===============================
 def plot_probs(human, ai):
-    fig, ax = plt.subplots()
-    ax.bar(["Human", "AI"], [human, ai], color=["#2ecc71", "#e74c3c"])
-    ax.set_ylim(0, 1)
-    ax.set_ylabel("Probability")
-    st.pyplot(fig)
+    st.bar_chart(
+        {
+            "Human": human,
+            "AI": ai
+        }
+    )
+
+    
 
 def explain_decision(p):
     if p > 0.8:
