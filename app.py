@@ -1,10 +1,11 @@
 import streamlit as st
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 from PIL import Image
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from torchvision import models, transforms
+from huggingface_hub import hf_hub_download
 
 # ===============================
 # STREAMLIT CONFIG
@@ -17,36 +18,91 @@ st.set_page_config(
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ===============================
-# PATH CONFIG (CHANGE ONLY THESE)
+# HUGGING FACE MODEL REPOS
 # ===============================
-TEXT_MODEL_PATH  = "models/text_roberta_final"
-IMAGE_MODEL_PATH = "models/ai_image_resnet.pth"
-# Audio model assumed probabilistic output (as per your pipeline)
+TEXT_REPO  = "chinmaianjali/text-roberta-ai-detector"
+IMAGE_REPO = "chinmaianjali/image-mobilenet-ai-detector"
+AUDIO_REPO = "chinmaianjali/audio-cnn-ai-detector"
 
 # ===============================
-# LOAD MODELS (CACHED)
+# LOAD TEXT MODEL
 # ===============================
 @st.cache_resource
 def load_text_model():
-    tokenizer = AutoTokenizer.from_pretrained(TEXT_MODEL_PATH)
-    model = AutoModelForSequenceClassification.from_pretrained(TEXT_MODEL_PATH)
+    tokenizer = AutoTokenizer.from_pretrained(TEXT_REPO)
+    model = AutoModelForSequenceClassification.from_pretrained(TEXT_REPO)
     model.to(device).eval()
     return tokenizer, model
 
+# ===============================
+# LOAD IMAGE MODEL
+# ===============================
 @st.cache_resource
 def load_image_model():
-    checkpoint = torch.load(IMAGE_MODEL_PATH, map_location=device)
-    model = models.mobilenet_v2(weights=None)
-    model.classifier[1] = torch.nn.Linear(
-        model.classifier[1].in_features,
-        checkpoint["num_classes"]
+    ckpt_path = hf_hub_download(
+        repo_id=IMAGE_REPO,
+        filename="image_model.pth"
     )
+
+    checkpoint = torch.load(ckpt_path, map_location=device)
+
+    model = models.mobilenet_v2(weights=None)
+    model.classifier[1] = nn.Linear(
+        model.classifier[1].in_features,
+        checkpoint.get("num_classes", 2)
+    )
+
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device).eval()
     return model
 
+# ===============================
+# LOAD AUDIO MODEL
+# ===============================
+class AudioCNN(nn.Module):
+    def __init__(self, num_classes=2):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(1, 16, 3, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(16, 32, 3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2)
+        )
+        self.fc = nn.Sequential(
+            nn.Linear(32, 64),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(64, num_classes)
+        )
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = x.mean(dim=[2, 3])
+        return self.fc(x)
+
+@st.cache_resource
+def load_audio_model():
+    audio_path = hf_hub_download(
+        repo_id=AUDIO_REPO,
+        filename="audio_model.pth"
+    )
+    model = AudioCNN()
+    state = torch.load(audio_path, map_location=device)
+    model.load_state_dict(state)
+    model.to(device).eval()
+    return model
+
+# ===============================
+# LOAD ALL MODELS (ONCE)
+# ===============================
 tokenizer, text_model = load_text_model()
 image_model = load_image_model()
+audio_model = load_audio_model()
 
 # ===============================
 # INFERENCE FUNCTIONS
@@ -73,131 +129,77 @@ def infer_image_prob(img):
         probs = F.softmax(image_model(x), dim=1)
     return probs[0, 1].item()
 
+def infer_audio_prob(x):
+    with torch.no_grad():
+        probs = F.softmax(audio_model(x.to(device)), dim=1)
+    return probs[0, 1].item()
+
 # ===============================
-# MULTIMODAL FUSION (FINAL)
+# MULTIMODAL FUSION
 # ===============================
 def multimodal_fusion(P_text=None, P_audio=None, P_image=None):
-    BASE_W = {"text":0.4, "audio":0.25, "image":0.35}
+    base_w = {"text":0.4, "audio":0.25, "image":0.35}
 
-    def dampen(p, w):
+    def damp(p, w):
         return w * 0.3 if (p < 0.1 or p > 0.9) else w
 
     probs, weights = [], []
 
     if P_text is not None:
         probs.append(P_text)
-        weights.append(dampen(P_text, BASE_W["text"]))
+        weights.append(damp(P_text, base_w["text"]))
     if P_audio is not None:
         probs.append(P_audio)
-        weights.append(BASE_W["audio"])
+        weights.append(base_w["audio"])
     if P_image is not None:
         probs.append(P_image)
-        weights.append(BASE_W["image"])
+        weights.append(base_w["image"])
 
     weights = [w / sum(weights) for w in weights]
     P_fused = sum(p * w for p, w in zip(probs, weights))
+
     label = "AI-GENERATED" if P_fused >= 0.45 else "HUMAN"
     return round(P_fused, 4), label
 
 # ===============================
-# XAI EXPLANATIONS
+# STREAMLIT UI
 # ===============================
-def explain_text(p):
-    if p > 0.8:
-        return [
-            "Highly structured and neutral language",
-            "Lack of personal tone",
-            "Consistent sentence complexity",
-            "Statistical AI-like phrasing patterns"
-        ]
-    elif p > 0.5:
-        return [
-            "Moderate repetition",
-            "Formal and generic style"
-        ]
-    else:
-        return [
-            "Human-like variability",
-            "Natural flow and context shifts"
-        ]
+st.title("🧠 Multimodal AI Content Detector")
 
-def explain_image(p):
-    return [
-        "Unnatural texture regularity",
-        "CNN features aligned with synthetic images",
-        "Inconsistent lighting artifacts"
-    ] if p > 0.5 else [
-        "Natural texture gradients",
-        "Camera-like noise patterns"
-    ]
-
-def explain_fusion():
-    return [
-        "Predictions combined across multiple modalities",
-        "Overconfident single-model predictions penalized",
-        "Consensus-based final decision improves robustness"
-    ]
-
-# ===============================
-# UI
-# ===============================
-st.title("🧠 Multimodal AI Content Detection System")
-
-tabs = st.tabs([
-    "📝 Text Module",
-    "🖼️ Image Module",
-    "🌐 Multimodal Fusion"
-])
+tabs = st.tabs(["📝 Text", "🖼️ Image", "🌐 Multimodal Fusion"])
 
 # -------------------------------
-# TEXT MODULE
+# TEXT TAB
 # -------------------------------
 with tabs[0]:
-    st.subheader("Text AI Detection")
-    text_input = st.text_area("Enter text")
-
+    text = st.text_area("Enter text")
     if st.button("Analyze Text"):
-        if text_input.strip():
-            P_text = infer_text_prob(text_input)
-            st.metric("AI Probability", f"{P_text:.4f}")
-            st.write("### Explanation")
-            for r in explain_text(P_text):
-                st.write("•", r)
+        if text.strip():
+            p = infer_text_prob(text)
+            st.metric("AI Probability", f"{p:.4f}")
         else:
-            st.warning("Please enter text.")
+            st.warning("Please enter some text.")
 
 # -------------------------------
-# IMAGE MODULE
+# IMAGE TAB
 # -------------------------------
 with tabs[1]:
-    st.subheader("Image AI Detection")
     img_file = st.file_uploader("Upload image", type=["jpg", "png"])
-
     if img_file:
         img = Image.open(img_file).convert("RGB")
         st.image(img, width=300)
-
-        P_img = infer_image_prob(img)
-        st.metric("AI Probability", f"{P_img:.4f}")
-        st.write("### Explanation")
-        for r in explain_image(P_img):
-            st.write("•", r)
+        p = infer_image_prob(img)
+        st.metric("AI Probability", f"{p:.4f}")
 
 # -------------------------------
-# MULTIMODAL FUSION
+# MULTIMODAL FUSION TAB
 # -------------------------------
 with tabs[2]:
-    st.subheader("Multimodal Fusion")
-
-    P_text  = st.number_input("Text AI Probability", 0.0, 1.0, 0.0)
-    P_audio = st.number_input("Audio AI Probability", 0.0, 1.0, 0.0)
-    P_image = st.number_input("Image AI Probability", 0.0, 1.0, 0.0)
+    p_text  = st.number_input("Text AI Probability", 0.0, 1.0, 0.0)
+    p_audio = st.number_input("Audio AI Probability", 0.0, 1.0, 0.0)
+    p_image = st.number_input("Image AI Probability", 0.0, 1.0, 0.0)
 
     if st.button("Run Fusion"):
-        P_fused, label = multimodal_fusion(P_text, P_audio, P_image)
-        st.metric("Fused AI Probability", f"{P_fused}")
+        p_fused, label = multimodal_fusion(p_text, p_audio, p_image)
+        st.metric("Fused AI Probability", f"{p_fused}")
         st.success(f"FINAL DECISION: {label}")
-
-        st.write("### Why this decision?")
-        for r in explain_fusion():
-            st.write("•", r)
